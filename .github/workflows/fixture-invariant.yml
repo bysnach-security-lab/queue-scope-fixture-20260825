@@ -1,0 +1,46 @@
+name: fixture invariant
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  invariant:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out only the trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test the exact PR tree without executing it
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags \
+            https://github.com/bysnach-security-lab/queue-scope-fixture-20260825.git \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/poc/pr-head"
+          test "$(git rev-parse refs/remotes/poc/pr-head)" = "$HEAD_SHA"
+
+          left="$(git show "$HEAD_SHA:poc/pair/a.flag" | tr -d '\r\n')"
+          right="$(git show "$HEAD_SHA:poc/pair/b.flag" | tr -d '\r\n')"
+          case "$left" in 0|1) ;; *) exit 2 ;; esac
+          case "$right" in 0|1) ;; *) exit 2 ;; esac
+          printf 'a=%s b=%s\n' "$left" "$right"
+          if [[ "$left" = 1 && "$right" = 1 ]]; then
+            echo 'combined fixture invariant failed'
+            exit 1
+          fi
+
+
