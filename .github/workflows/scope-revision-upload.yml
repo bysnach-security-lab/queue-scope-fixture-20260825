@@ -32,7 +32,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch the PR head only as data and validate exact blobs
+      - name: Fetch the current PR ref only as data and validate the exact event revision
         shell: bash
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -53,7 +53,11 @@ jobs:
           git fetch --no-tags \
             https://github.com/bysnach-security-lab/queue-scope-fixture-20260825.git \
             "+refs/pull/${PR_NUMBER}/head:refs/remotes/poc/pr-head"
-          test "$(git rev-parse refs/remotes/poc/pr-head)" = "$HEAD_SHA"
+          current_pr_ref_sha="$(git rev-parse refs/remotes/poc/pr-head)"
+          [[ "$current_pr_ref_sha" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$HEAD_SHA^{commit}"
+          git merge-base --is-ancestor "$HEAD_SHA" "$current_pr_ref_sha"
+          echo "FETCHED_CURRENT_PR_REF_SHA=$current_pr_ref_sha" >> "$GITHUB_ENV"
 
           zero_blob="$(printf '0\n' | git hash-object --stdin)"
           one_blob="$(printf '1\n' | git hash-object --stdin)"
@@ -121,6 +125,7 @@ jobs:
           SCOPE_MAP: ${{ steps.mergify.outputs.scopes }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FETCHED_CURRENT_PR_REF_SHA: ${{ env.FETCHED_CURRENT_PR_REF_SHA }}
           RUN_ACTOR: ${{ github.actor }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           RUN_ID: ${{ github.run_id }}
@@ -150,6 +155,7 @@ jobs:
           jq -n \
             --arg captured_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg workflow_base "$(git rev-parse HEAD)" \
+            --arg fetched_current_pr_ref_sha "$FETCHED_CURRENT_PR_REF_SHA" \
             --arg run_actor "$RUN_ACTOR" \
             --arg triggering_actor "$TRIGGERING_ACTOR" \
             --arg run_id "$RUN_ID" \
@@ -168,6 +174,7 @@ jobs:
               triggering_actor: $triggering_actor,
               event: $event[0],
               trusted_workflow_base_sha: $workflow_base,
+              fetched_current_pr_ref_sha: $fetched_current_pr_ref_sha,
               actual_changed_files: $changed[0],
               cli_selected_base: $selected_refs[0].base,
               cli_selected_head: $selected_refs[0].head,
