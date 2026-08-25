@@ -1,0 +1,188 @@
+name: stale revision scope upload
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stale-revision-scope-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  detect-and-upload:
+    if: >-
+      github.repository == 'bysnach-security-lab/queue-scope-fixture-20260825' &&
+      github.event.pull_request.user.login == 'vbysnach' &&
+      github.event.pull_request.head.repo.full_name == 'vbysnach/queue-scope-fixture-20260825' &&
+      github.event.pull_request.base.ref == 'main' &&
+      ((github.event.pull_request.head.ref == 'revision-a' &&
+        github.event.pull_request.title == 'Held revision A') ||
+       (github.event.pull_request.head.ref == 'revision-b' &&
+        github.event.pull_request.title == 'Held revision B'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out only the exact trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the PR head only as data and validate exact blobs
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+
+          jq -e '
+            .pull_request.body == null or .pull_request.body == ""
+          ' "$GITHUB_EVENT_PATH" > /dev/null
+
+          git fetch --no-tags \
+            https://github.com/bysnach-security-lab/queue-scope-fixture-20260825.git \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/poc/pr-head"
+          test "$(git rev-parse refs/remotes/poc/pr-head)" = "$HEAD_SHA"
+
+          zero_blob="$(printf '0\n' | git hash-object --stdin)"
+          one_blob="$(printf '1\n' | git hash-object --stdin)"
+          revision_blob="$(printf 'revision-a\n' | git hash-object --stdin)"
+          mapfile -d '' changed < <(git diff --name-only -z "$BASE_SHA...$HEAD_SHA")
+
+          case "$HEAD_REF" in
+            revision-a)
+              test "$(git rev-parse "$HEAD_SHA:poc/revision/a.txt")" = "$revision_blob"
+              if test "${#changed[@]}" -eq 1; then
+                test "${changed[0]}" = 'poc/revision/a.txt'
+                test "$(git rev-parse "$HEAD_SHA:poc/pair/a.flag")" = "$zero_blob"
+              elif test "${#changed[@]}" -eq 2; then
+                test "${changed[0]}" = 'poc/pair/a.flag'
+                test "${changed[1]}" = 'poc/revision/a.txt'
+                test "$(git rev-parse "$HEAD_SHA:poc/pair/a.flag")" = "$one_blob"
+              else
+                exit 2
+              fi
+              test "$(git rev-parse "$HEAD_SHA:poc/pair/b.flag")" = "$zero_blob"
+              ;;
+            revision-b)
+              test "${#changed[@]}" -eq 1
+              test "${changed[0]}" = 'poc/pair/b.flag'
+              test "$(git rev-parse "$HEAD_SHA:poc/pair/a.flag")" = "$zero_blob"
+              test "$(git rev-parse "$HEAD_SHA:poc/pair/b.flag")" = "$one_blob"
+              if git cat-file -e "$HEAD_SHA:poc/revision/a.txt" 2>/dev/null; then
+                exit 2
+              fi
+              ;;
+            *) exit 2 ;;
+          esac
+
+          test -f .github/poc-scopes.yml
+          test -f .github/workflows/scope-revision-upload.yml
+
+      - name: Detect and upload scopes with the official client
+        id: mergify
+        uses: Mergifyio/gha-mergify-ci@5e8176734bc525c7fd8b2e812f0fa47246f601b7 # v25
+        with:
+          action: scopes
+          token: ${{ secrets.MERGIFY_SCOPE_FIXTURE_CI_KEY }}
+          mergify_cli_version: 2026.7.21.1
+          mergify_config_path: .github/poc-scopes.yml
+
+      - name: Capture exact refs selected by the same pinned CLI
+        shell: bash
+        env:
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          mergify ci git-refs --format json > evidence/selected-refs.json
+          jq -e --arg event_head "$EVENT_HEAD_SHA" '
+            (.base | type == "string") and
+            (.base | test("^[0-9a-f]{40}$")) and
+            (.head == $event_head) and
+            (.head | test("^[0-9a-f]{40}$")) and
+            (.source == "github_event_pull_request")
+          ' evidence/selected-refs.json > /dev/null
+
+      - name: Build allowlisted evidence
+        shell: bash
+        env:
+          SCOPE_MAP: ${{ steps.mergify.outputs.scopes }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          jq '{
+            event_action: .action,
+            sender_login: .sender.login,
+            pull_request: {
+              number: .pull_request.number,
+              author: .pull_request.user.login,
+              title: .pull_request.title,
+              body: .pull_request.body,
+              base_sha: .pull_request.base.sha,
+              head_sha: .pull_request.head.sha,
+              head_ref: .pull_request.head.ref,
+              head_repo: .pull_request.head.repo.full_name
+            }
+          }' "$GITHUB_EVENT_PATH" > evidence/event.json
+
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" \
+            | jq -R -s 'split("\n") | map(select(length > 0))' \
+            > evidence/actual-changed-files.json
+
+          jq -n \
+            --arg captured_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg workflow_base "$(git rev-parse HEAD)" \
+            --arg run_actor "$RUN_ACTOR" \
+            --arg triggering_actor "$TRIGGERING_ACTOR" \
+            --arg run_id "$RUN_ID" \
+            --arg run_attempt "$RUN_ATTEMPT" \
+            --argjson scope_map "$SCOPE_MAP" \
+            --slurpfile event evidence/event.json \
+            --slurpfile changed evidence/actual-changed-files.json \
+            --slurpfile selected_refs evidence/selected-refs.json \
+            --arg workflow_sha256 "$(sha256sum .github/workflows/scope-revision-upload.yml | cut -d' ' -f1)" \
+            --arg scope_config_sha256 "$(sha256sum .github/poc-scopes.yml | cut -d' ' -f1)" \
+            '{
+              captured_at_utc: $captured_at,
+              run_id: ($run_id | tonumber),
+              run_attempt: ($run_attempt | tonumber),
+              run_actor: $run_actor,
+              triggering_actor: $triggering_actor,
+              event: $event[0],
+              trusted_workflow_base_sha: $workflow_base,
+              actual_changed_files: $changed[0],
+              cli_selected_base: $selected_refs[0].base,
+              cli_selected_head: $selected_refs[0].head,
+              cli_reference_source: $selected_refs[0].source,
+              action_scope_outputs: $scope_map,
+              trusted_workflow_sha256: $workflow_sha256,
+              trusted_scope_config_sha256: $scope_config_sha256
+            }' > evidence/result.json
+          jq . evidence/result.json
+
+      - name: Upload only sanitized evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stale-revision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
