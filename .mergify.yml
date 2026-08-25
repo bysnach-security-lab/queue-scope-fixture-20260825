@@ -16,5 +16,3 @@ queue_rules:
       - check-success = invariant
     merge_method: squash
 
-
-
