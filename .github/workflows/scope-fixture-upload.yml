@@ -1,0 +1,150 @@
+name: scope fixture upload
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scope-fixture-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  detect-and-upload:
+    if: >-
+      github.repository == 'bysnach-security-lab/queue-scope-fixture-20260825' &&
+      github.event.pull_request.user.login == 'vbysnach' &&
+      github.event.pull_request.head.repo.full_name == 'vbysnach/queue-scope-fixture-20260825' &&
+      github.event.pull_request.base.ref == 'main' &&
+      (github.event.pull_request.head.ref == 'scope-a' ||
+       github.event.pull_request.head.ref == 'scope-b')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out only the exact trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the PR head as data and validate the fixture diff
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+
+          git fetch --no-tags \
+            https://github.com/bysnach-security-lab/queue-scope-fixture-20260825.git \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/poc/pr-head"
+          test "$(git rev-parse refs/remotes/poc/pr-head)" = "$HEAD_SHA"
+
+          mapfile -d '' changed < <(git diff --name-only -z "$BASE_SHA...$HEAD_SHA")
+          test "${#changed[@]}" -eq 1
+          case "$HEAD_REF" in
+            scope-a) test "${changed[0]}" = 'poc/pair/a.flag' ;;
+            scope-b) test "${changed[0]}" = 'poc/pair/b.flag' ;;
+            *) exit 2 ;;
+          esac
+
+          test -f .github/poc-scopes.yml
+          test -f .github/workflows/scope-fixture-upload.yml
+
+      - name: Detect and upload scopes with the official client
+        id: mergify
+        uses: Mergifyio/gha-mergify-ci@5e8176734bc525c7fd8b2e812f0fa47246f601b7 # v25
+        with:
+          action: scopes
+          token: ${{ secrets.MERGIFY_SCOPE_FIXTURE_CI_KEY }}
+          mergify_cli_version: 2026.7.21.1
+          mergify_config_path: .github/poc-scopes.yml
+
+      - name: Capture the exact refs selected by the same pinned CLI
+        shell: bash
+        env:
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          mergify ci git-refs --format json > evidence/selected-refs.json
+          jq -e --arg event_head "$EVENT_HEAD_SHA" '
+            (.base | type == "string") and
+            (.base | test("^[0-9a-f]{40}$")) and
+            (.head == $event_head) and
+            (.head | test("^[0-9a-f]{40}$")) and
+            (.source == "github_event_pull_request" or .source == "merge_queue")
+          ' evidence/selected-refs.json > /dev/null
+
+      - name: Build allowlisted evidence
+        shell: bash
+        env:
+          SCOPE_MAP: ${{ steps.mergify.outputs.scopes }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          jq '{
+            event_action: .action,
+            sender_login: .sender.login,
+            pull_request: {
+              number: .pull_request.number,
+              author: .pull_request.user.login,
+              title: .pull_request.title,
+              body: .pull_request.body,
+              base_sha: .pull_request.base.sha,
+              head_sha: .pull_request.head.sha,
+              head_ref: .pull_request.head.ref,
+              head_repo: .pull_request.head.repo.full_name
+            }
+          }' "$GITHUB_EVENT_PATH" > evidence/event.json
+
+          # The preceding step already enforces one exact, newline-free
+          # fixture path, so a line-oriented allowlist copy is safe here.
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" \
+            | jq -R -s 'split("\n") | map(select(length > 0))' \
+            > evidence/actual-changed-files.json
+
+          jq -n \
+            --arg captured_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg workflow_base "$(git rev-parse HEAD)" \
+            --argjson scope_map "$SCOPE_MAP" \
+            --slurpfile event evidence/event.json \
+            --slurpfile changed evidence/actual-changed-files.json \
+            --slurpfile selected_refs evidence/selected-refs.json \
+            --arg workflow_sha256 "$(sha256sum .github/workflows/scope-fixture-upload.yml | cut -d' ' -f1)" \
+            --arg scope_config_sha256 "$(sha256sum .github/poc-scopes.yml | cut -d' ' -f1)" \
+            '{
+              captured_at_utc: $captured_at,
+              event: $event[0],
+              trusted_workflow_base_sha: $workflow_base,
+              actual_changed_files: $changed[0],
+              cli_selected_base: $selected_refs[0].base,
+              cli_selected_head: $selected_refs[0].head,
+              cli_reference_source: $selected_refs[0].source,
+              action_scope_outputs: $scope_map,
+              trusted_workflow_sha256: $workflow_sha256,
+              trusted_scope_config_sha256: $scope_config_sha256
+            }' > evidence/result.json
+          jq . evidence/result.json
+
+      - name: Upload only sanitized evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scope-fixture-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+
