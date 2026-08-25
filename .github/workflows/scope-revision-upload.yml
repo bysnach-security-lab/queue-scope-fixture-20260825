@@ -18,10 +18,10 @@ jobs:
       github.event.pull_request.user.login == 'vbysnach' &&
       github.event.pull_request.head.repo.full_name == 'vbysnach/queue-scope-fixture-20260825' &&
       github.event.pull_request.base.ref == 'main' &&
-      ((github.event.pull_request.head.ref == 'revision-a' &&
-        github.event.pull_request.title == 'Held revision A') ||
-       (github.event.pull_request.head.ref == 'revision-b' &&
-        github.event.pull_request.title == 'Held revision B'))
+      ((github.event.pull_request.head.ref == 'revision-a-v2' &&
+        github.event.pull_request.title == 'Held revision A v2') ||
+       (github.event.pull_request.head.ref == 'revision-b-v2' &&
+        github.event.pull_request.title == 'Held revision B v2'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -61,30 +61,30 @@ jobs:
 
           zero_blob="$(printf '0\n' | git hash-object --stdin)"
           one_blob="$(printf '1\n' | git hash-object --stdin)"
-          revision_blob="$(printf 'revision-a\n' | git hash-object --stdin)"
+          revision_blob="$(printf 'revision-a-v2\n' | git hash-object --stdin)"
           mapfile -d '' changed < <(git diff --name-only -z "$BASE_SHA...$HEAD_SHA")
 
           case "$HEAD_REF" in
-            revision-a)
-              test "$(git rev-parse "$HEAD_SHA:poc/revision/a.txt")" = "$revision_blob"
+            revision-a-v2)
+              test "$(git rev-parse "$HEAD_SHA:poc/revision/a-v2.txt")" = "$revision_blob"
               if test "${#changed[@]}" -eq 1; then
-                test "${changed[0]}" = 'poc/revision/a.txt'
+                test "${changed[0]}" = 'poc/revision/a-v2.txt'
                 test "$(git rev-parse "$HEAD_SHA:poc/pair/a.flag")" = "$zero_blob"
               elif test "${#changed[@]}" -eq 2; then
                 test "${changed[0]}" = 'poc/pair/a.flag'
-                test "${changed[1]}" = 'poc/revision/a.txt'
+                test "${changed[1]}" = 'poc/revision/a-v2.txt'
                 test "$(git rev-parse "$HEAD_SHA:poc/pair/a.flag")" = "$one_blob"
               else
                 exit 2
               fi
               test "$(git rev-parse "$HEAD_SHA:poc/pair/b.flag")" = "$zero_blob"
               ;;
-            revision-b)
+            revision-b-v2)
               test "${#changed[@]}" -eq 1
               test "${changed[0]}" = 'poc/pair/b.flag'
               test "$(git rev-parse "$HEAD_SHA:poc/pair/a.flag")" = "$zero_blob"
               test "$(git rev-parse "$HEAD_SHA:poc/pair/b.flag")" = "$one_blob"
-              if git cat-file -e "$HEAD_SHA:poc/revision/a.txt" 2>/dev/null; then
+              if git cat-file -e "$HEAD_SHA:poc/revision/a-v2.txt" 2>/dev/null; then
                 exit 2
               fi
               ;;
