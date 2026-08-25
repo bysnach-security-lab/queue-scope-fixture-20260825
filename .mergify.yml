@@ -1,0 +1,20 @@
+merge_queue:
+  mode: parallel
+  max_parallel_checks: 2
+
+scopes:
+  source:
+    manual:
+
+queue_rules:
+  - name: fixture-held
+    batch_size: 1
+    queue_conditions:
+      - check-success = invariant
+    merge_conditions:
+      - label = __fixture_never_release__
+      - check-success = invariant
+    merge_method: squash
+
+
+
