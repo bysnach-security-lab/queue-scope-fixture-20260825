@@ -1,0 +1,9 @@
+scopes:
+  source:
+    files:
+      integrity:
+        include:
+          - poc/pair/**
+
+
+
