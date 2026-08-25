@@ -42,5 +42,3 @@ jobs:
             echo 'combined fixture invariant failed'
             exit 1
           fi
-
-
